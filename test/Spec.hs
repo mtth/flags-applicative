@@ -27,7 +27,7 @@ main = hspec $ do
       res `shouldBe` Left (UnknownFlag "bar")
     it "should detect unexpected flags" $ do
       let
-        parser = boolFlag "bar" "" <|> boolFlag "foo" ""
+        parser = switch "bar" "" <|> switch "foo" ""
         res = parseFlags parser ["--bar", "--foo"]
       res `shouldBe` Left (UnexpectedFlags ("foo" :| []))
     it "should branch correctly with unary flags" $ do
@@ -37,7 +37,7 @@ main = hspec $ do
       res `shouldBe` Right (Right "yes", ["no"])
     it "should branch correctly with nullary flags" $ do
       let
-        parser = (True <$ boolFlag "true" "") <|> (False <$ boolFlag "false" "")
+        parser = (True <$ switch "true" "") <|> (False <$ switch "false" "")
         res = parseFlags parser ["--true", "b", "a"]
       res `shouldBe` Right (True, ["b", "a"])
     it "should fail on inconsistent flag values" $ do

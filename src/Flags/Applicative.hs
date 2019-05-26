@@ -36,10 +36,8 @@
 module Flags.Applicative
   ( Name, Description, FlagParser, FlagError(..)
   , parseFlags, parseSystemFlagsOrDie
-  -- * Nullary flags
-  , boolFlag
-  -- * Unary flags
-  , unaryFlag, textFlag, flag, repeatedTextFlag, repeatedFlag
+  -- * Defining flags
+  , switch, unaryFlag, textFlag, flag, repeatedTextFlag, repeatedFlag
   ) where
 
 import Control.Applicative ((<|>), Alternative, empty, optional)
@@ -97,8 +95,8 @@ data ParserError
 --
 -- There are two types of flags:
 --
--- * Nullary flags created with 'boolFlag' which are 'True' when set and 'False' otherwise (a.k.a.
--- switches). For example @--version@ or @--enable_foo@.
+-- * Nullary flags created with 'switch which are 'True' when set and 'False' otherwise. For example
+-- @--version@ or @--enable_foo@.
 -- * Unary flags created with 'unaryFlag' and its convenience variants (e.g. 'textFlag',
 -- 'numericFlag'). These expect a value to be passed in either after an equal sign (@--foo=value@)
 -- or as the following input value (@--foo value@). If the value starts with @--@, only the first
@@ -243,13 +241,13 @@ parseSystemFlagsOrDie parser = parseFlags parser <$> getArgs >>= \case
   Left err -> die $ T.unpack $ displayFlagError err
   Right res -> pure res
 
--- Marke a flag as used. This is useful to check for unexpected flags after parsing is complete.
+-- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
 useFlag :: Name -> Action ()
 useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
 
 -- | Returns a nullary parser with the given name and description.
-boolFlag :: Name -> Description -> FlagParser Bool
-boolFlag name desc = Actionable action flags where
+switch :: Name -> Description -> FlagParser Bool
+switch name desc = Actionable action flags where
   action = do
     present <- asks (Map.member name)
     when present $ useFlag name
