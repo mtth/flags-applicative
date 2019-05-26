@@ -51,6 +51,7 @@ import Data.List (isPrefixOf)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map.Strict (Map)
 import Data.Set (Set)
+import Data.Semigroup ((<>))
 import Data.Text (Text)
 import System.Exit (die)
 import System.Environment (getArgs)
@@ -219,6 +220,8 @@ data FlagError
   | MissingFlagValue Name
   -- | A flag with a reserved name was declared.
   | ReservedFlag Name
+  -- | A nullary flag was given a value.
+  | UnexpectedFlagValue Name
   -- | At least one flag was set but unused. This can happen when optional flags are set but their
   -- branch is not selected.
   | UnexpectedFlags (NonEmpty Name)
@@ -237,6 +240,7 @@ displayFlagError (InvalidFlagValue name val msg) =
 displayFlagError (MissingFlag name) = qualify name <> " is required but was not set"
 displayFlagError (MissingFlagValue name) = "missing value for " <> qualify name
 displayFlagError (ReservedFlag name) = qualify name <> " was declared but is reserved"
+displayFlagError (UnexpectedFlagValue name) = "unexpected value for " <> qualify name
 displayFlagError (UnexpectedFlags names) =
   "unexpected " <> (T.intercalate " " $ fmap qualify $ toList $ names)
 displayFlagError (UnknownFlag name) = "undeclared " <> qualify name
@@ -322,7 +326,9 @@ gatherValues ignoreUnknown flags = go where
             Nothing -> if ignoreUnknown
               then second (token:) <$> go tokens
               else Left (UnknownFlag name)
-            Just (Flag Nullary _) -> insert "" tokens
+            Just (Flag Nullary _) -> if T.null pval
+              then insert "" tokens
+              else Left $ UnexpectedFlagValue name
             Just (Flag Unary _) -> case T.uncons pval of
               Nothing -> case tokens of
                 (token':tokens') -> if prefix `isPrefixOf` token'
@@ -372,7 +378,7 @@ parseFlags parser tokens = case reservedParser of
           flags'' = foldl' (\m name -> Map.insert name (Flag Nullary "") m) flags' sswitches
         Right (action, flags'')
     (rv, unused, tokens'') <- runAction False action flags tokens'
-    case Set.minView unused of
+    case Set.minView $ Set.difference unused (sflags <> sswitches) of
       Nothing -> Right (rv, tokens'')
       Just (name, names) -> Left $ UnexpectedFlags $ name :| toList names
 

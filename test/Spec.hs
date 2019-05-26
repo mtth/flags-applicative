@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 import Control.Applicative ((<|>))
+import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty(..))
 import Flags.Applicative
 import Test.Hspec
@@ -20,6 +21,11 @@ main = hspec $ do
         parser = (,) <$> textFlag "foo" "" <*> textFlag "foo" ""
         res = parseFlags parser []
       res `shouldBe` Left (DuplicateFlag "foo")
+    it "should support help" $ do
+      let
+        parser = textFlag "foo" ""
+        res = parseFlags parser ["--foo=abc", "hi", "--help"]
+      isLeft res `shouldBe` True
     it "should fail on unknown flags" $ do
       let
         parser = textFlag "foo" ""
@@ -55,3 +61,23 @@ main = hspec $ do
         parser = textListFlag "," "bar" ""
         res = parseFlags parser ["--bar=a,b,c", "def"]
       res `shouldBe` Right (["a", "b", "c"], ["def"])
+    it "should swallow switches" $ do
+      let
+        parser = boolFlag "foo" ""
+        res = parseFlags parser ["--foo", "--bar", "--swallowed_switches=bar"]
+      res `shouldBe` Right (True, [])
+    it "should fail when a switch is set as a flag" $ do
+      let
+        parser = boolFlag "foo" ""
+        res = parseFlags parser ["--foo=3"]
+      res `shouldBe` Left (UnexpectedFlagValue "foo")
+    it "should swallow flags" $ do
+      let
+        parser = boolFlag "foo" ""
+        res = parseFlags parser ["--bar=2", "--swallowed_flags=bar"]
+      res `shouldBe` Right (False, [])
+    it "should fail when a flag is swallowed as a switch" $ do
+      let
+        parser = boolFlag "foo" ""
+        res = parseFlags parser ["--foo", "--bar=1", "--swallowed_switches=bar"]
+      res `shouldBe` Left (UnexpectedFlagValue "bar")
