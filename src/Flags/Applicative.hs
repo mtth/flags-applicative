@@ -33,6 +33,7 @@
 
 module Flags.Applicative
   ( Name, Description, FlagParser, FlagError(..)
+  -- * Running parsers
   , parseFlags, parseSystemFlagsOrDie
   -- * Defining flags
   , switch, boolFlag, flag, textFlag, autoFlag, textListFlag, autoListFlag
@@ -81,7 +82,8 @@ type Name = Text
 qualify :: Name -> Text
 qualify name = T.pack prefix <> name
 
--- | An human-readable explanation of what the flag does.
+-- | An human-readable explanation of what the flag does. It is displayed when the parser is invoked
+-- with the @--help@ flag.
 type Description = Text
 
 data Arity = Nullary | Unary deriving Eq
@@ -146,14 +148,13 @@ data ParserError
 --
 -- There are two types of flags:
 --
--- * Nullary flags created with 'switch which are 'True' when set and 'False' otherwise. For example
--- @--version@ or @--enable_foo@.
--- * Unary flags created with 'unaryFlag' and its convenience variants (e.g. 'textFlag', 'flag',
--- 'repeatedFlag'). These expect a value to be passed in either after an equal sign (@--foo=value@)
+-- * Nullary flags created with 'switch' and 'boolFlag', which do not accept a value.
+-- * Unary flags created with 'flag' and its convenience variants (e.g. 'textFlag', 'autoFlag',
+-- 'autoListFlag'). These expect a value to be passed in either after an equal sign (@--foo=value@)
 -- or as the following input value (@--foo value@). If the value starts with @--@, only the first
 -- form is accepted.
 --
--- You can run a parser using 'parseFlags'.
+-- You can run a parser using 'parseFlags' or 'parseSystemFlagsOrDie'.
 data FlagParser a
   = Actionable (Action a) (Map Name Flag) Usage
   | Invalid ParserError
@@ -246,7 +247,9 @@ displayFlagError (UnknownFlag name) = "undeclared " <> qualify name
 useFlag :: Name -> Action ()
 useFlag name = modify (Set.insert name)
 
--- | Returns a parser with the given name and description for a flag with no value.
+-- | Returns a parser with the given name and description for a flag with no value, failing if the
+-- flag is not present. See also 'boolFlag' for a variant which doesn't fail when the flag is
+-- missing.
 switch :: Name -> Description -> FlagParser ()
 switch name desc = Actionable action flags usage where
   action = asks (Map.member name) >>= \case
@@ -255,7 +258,8 @@ switch name desc = Actionable action flags usage where
   flags = Map.singleton name (Flag Nullary desc)
   usage = Exactly name
 
--- | Returns a parser with the given name and description for a flag with no value.
+-- | Returns a parser with the given name and description for a flag with no value, returning
+-- whether the flag was present.
 boolFlag :: Name -> Description -> FlagParser Bool
 boolFlag name desc = (True <$ switch name desc) <|> pure False
 
@@ -282,13 +286,13 @@ textFlag = flag Right
 autoFlag :: Read a => Name -> Description -> FlagParser a
 autoFlag = flag (readEither . T.unpack)
 
--- | Returns a parser for a multiple text value.
+-- | Returns a parser for a single flag with multiple text values.
 textListFlag :: Text -> Name -> Description -> FlagParser [Text]
 textListFlag sep =  flag $ Right . T.splitOn sep
 
--- | Returns a parser for multiple values with a 'Read' instance, with a configurable separator.
--- Empty values are always ignored, so it's possible to declare an empty list as @--list=@ and
--- trailing commas are supported.
+-- | Returns a parser for a single flag with multiple values having a 'Read' instance, with a
+-- configurable separator. Empty values are always ignored, so it's possible to declare an empty
+-- list as @--list=@ and trailing commas are supported.
 autoListFlag :: Read a => Text -> Name -> Description -> FlagParser [a]
 autoListFlag sep =
   flag $ sequenceA . fmap (readEither . T.unpack) . filter (not . T.null) . T.splitOn sep
@@ -351,7 +355,7 @@ reservedParser =
 
 -- | Runs a parser on a list of tokens, returning the parsed flags alongside other non-flag
 -- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
--- tokens will be considered arguments (even if they look like flags).
+-- tokens will be considered arguments even if they look like flags.
 parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [String])
 parseFlags parser tokens = case reservedParser of
   Invalid _ -> error "unreachable"
