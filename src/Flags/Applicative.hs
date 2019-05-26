@@ -35,7 +35,7 @@ module Flags.Applicative
   ( Name, Description, FlagParser, FlagError(..)
   , parseFlags, parseSystemFlagsOrDie
   -- * Defining flags
-  , switch, flag, textFlag, autoFlag, textListFlag, autoListFlag
+  , switch, boolFlag, flag, textFlag, autoFlag, textListFlag, autoListFlag
   ) where
 
 import Control.Applicative ((<|>), Alternative, empty, optional)
@@ -44,7 +44,6 @@ import Control.Monad.Except (Except, catchError, runExcept, throwError)
 import Control.Monad.RWS.Strict (RWST, runRWST)
 import Control.Monad.Reader (asks)
 import Control.Monad.State.Strict (get, modify, put)
-import Control.Monad.Writer.Strict (tell)
 import Data.Bifunctor (first, second)
 import Data.Foldable (foldl', toList)
 import Data.List (isPrefixOf)
@@ -96,7 +95,7 @@ data ValueError
 
 type Action a = RWST
   (Map Name Text) -- Flag values (or empty for nullary flags).
-  (Set Name) -- Read flags.
+  () -- Unused.
   (Set Name) -- Used flags.
   (Except ValueError) -- Eventual parsing error.
   a
@@ -245,17 +244,20 @@ displayFlagError (UnknownFlag name) = "undeclared " <> qualify name
 
 -- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
 useFlag :: Name -> Action ()
-useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
+useFlag name = modify (Set.insert name)
 
 -- | Returns a parser with the given name and description for a flag with no value.
-switch :: Name -> Description -> FlagParser Bool
+switch :: Name -> Description -> FlagParser ()
 switch name desc = Actionable action flags usage where
-  action = do
-    present <- asks (Map.member name)
-    when present $ useFlag name
-    pure present
+  action = asks (Map.member name) >>= \case
+    True -> useFlag name
+    False -> throwError $ MissingValue name
   flags = Map.singleton name (Flag Nullary desc)
-  usage = emptyUsage `orElse` Exactly name
+  usage = Exactly name
+
+-- | Returns a parser with the given name and description for a flag with no value.
+boolFlag :: Name -> Description -> FlagParser Bool
+boolFlag name desc = (True <$ switch name desc) <|> pure False
 
 -- | Returns a parser using the given parsing function, name, and description for a flag with an
 -- associated value.
@@ -285,8 +287,11 @@ textListFlag :: Text -> Name -> Description -> FlagParser [Text]
 textListFlag sep =  flag $ Right . T.splitOn sep
 
 -- | Returns a parser for multiple values with a 'Read' instance, with a configurable separator.
+-- Empty values are always ignored, so it's possible to declare an empty list as @--list=@ and
+-- trailing commas are supported.
 autoListFlag :: Read a => Text -> Name -> Description -> FlagParser [a]
-autoListFlag sep = flag $ sequenceA . fmap (readEither . T.unpack) . T.splitOn sep
+autoListFlag sep =
+  flag $ sequenceA . fmap (readEither . T.unpack) . filter (not . T.null) . T.splitOn sep
 
 -- Tries to gather all raw flag values into a map. When @ignoreUnknown@ is true, this function will
 -- pass through any unknown flags into the returned argument list, otherwise it will throw a
@@ -325,26 +330,24 @@ gatherValues ignoreUnknown flags = go where
               Just (_, val) -> insert val tokens
 
 -- Runs a single parsing pass.
-runAction :: Bool -> Action a -> Map Name Flag -> [String] -> Either FlagError (a, [String])
+runAction :: Bool -> Action a -> Map Name Flag -> [String] -> Either FlagError (a, Set Name, [String])
 runAction ignoreUnknown action flags tokens = case gatherValues ignoreUnknown flags tokens of
   Left err -> Left err
   Right (values, args) -> case runExcept $ runRWST action values Set.empty of
-    Right (rv, usedNames, readNames) ->
-      let unused = Set.difference readNames usedNames
-      in case Set.minView unused of
-        Nothing -> Right (rv, args)
-        Just (name, names) -> Left $ UnexpectedFlags $ name :| toList names
+    Right (rv, usedNames, _) ->
+      let unused = Set.difference (Map.keysSet values) usedNames
+      in Right (rv, unused, args)
     Left (MissingValue name) -> Left $ MissingFlag name
     Left (InvalidValue name val msg) -> Left $ InvalidFlagValue name val msg
 
 -- Preprocessing parser.
 reservedParser :: FlagParser (Bool, Set Name, Set Name)
 reservedParser =
-  let setFlag name = Set.fromList <$> (flag (Right . T.splitOn ",") name "" <|> pure [])
+  let textSetFlag name = Set.fromList <$> (flag (Right . T.splitOn ",") name "" <|> pure [])
   in (,,)
-    <$> switch "help" ""
-    <*> setFlag "swallowed_flags"
-    <*> setFlag "swallowed_switches"
+    <$> boolFlag "help" ""
+    <*> textSetFlag "swallowed_flags"
+    <*> textSetFlag "swallowed_switches"
 
 -- | Runs a parser on a list of tokens, returning the parsed flags alongside other non-flag
 -- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
@@ -353,7 +356,7 @@ parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [String])
 parseFlags parser tokens = case reservedParser of
   Invalid _ -> error "unreachable"
   Actionable action0 flags0 _ -> do
-    ((showHelp, swallowedFlags, swallowedSwitches), tokens') <- runAction True action0 flags0 tokens
+    ((showHelp, sflags, sswitches), _, tokens') <- runAction True action0 flags0 tokens
     (action, flags) <- case parser of
       Invalid (Duplicate name) -> Left $ DuplicateFlag name
       Invalid Empty -> Left EmptyParser
@@ -363,10 +366,13 @@ parseFlags parser tokens = case reservedParser of
           Just name -> Left $ ReservedFlag name
         when showHelp $  Left (Help $ displayUsage flags usage)
         let
-          flags' = foldl' (\m name -> Map.insert name (Flag Unary "") m) flags swallowedFlags
-          flags'' = foldl' (\m name -> Map.insert name (Flag Nullary "") m) flags' swallowedSwitches
+          flags' = foldl' (\m name -> Map.insert name (Flag Unary "") m) flags sflags
+          flags'' = foldl' (\m name -> Map.insert name (Flag Nullary "") m) flags' sswitches
         Right (action, flags'')
-    runAction False action flags tokens'
+    (rv, unused, tokens'') <- runAction False action flags tokens'
+    case Set.minView unused of
+      Nothing -> Right (rv, tokens'')
+      Just (name, names) -> Left $ UnexpectedFlags $ name :| toList names
 
 -- | Runs a parser on the system's arguments, or exits with code 1 and prints the relevant error
 -- message in case of failure.
