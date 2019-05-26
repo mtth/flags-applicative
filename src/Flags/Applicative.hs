@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TupleSections #-}
 
 -- | Simple flags parsing module, inspired by @optparse-applicative@.
 --
@@ -15,7 +14,6 @@
 -- import Data.Text (Text)
 -- import Data.Text.Read (decimal)
 -- import Flags.Applicative
--- import System.Environment (getArgs)
 --
 -- data Options = Options
 --   { rootPath :: Text
@@ -30,15 +28,15 @@
 --
 -- main :: IO ()
 -- main = do
---   args <- getArgs
---   print $ parseFlags optionsParser args
+--   (opts, args) <- parseSystemFlagsOrDie optionsParser
+--   print opts
 -- @
 
 -- TODO: Add @--help@ support.
 
 module Flags.Applicative
   ( Name, FlagParser, FlagError(..), ParserError(..)
-  , parseFlags
+  , parseFlags, parseSystemFlagsOrDie
   -- * Nullary flags
   , boolFlag
   -- * Unary flags
@@ -54,11 +52,13 @@ import Control.Monad.State.Strict (get, modify, put)
 import Control.Monad.Writer.Strict (tell)
 import Data.Bifunctor (first, second)
 import Data.Foldable (toList)
+import Data.List (isPrefixOf)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map.Strict (Map)
 import Data.Maybe (isJust)
 import Data.Set (Set)
 import Data.Text (Text)
+import System.Exit (die)
 import System.Environment (getArgs)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
@@ -66,8 +66,8 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Read as T
 
--- | The name of a flag, can use all characters but @=@ (the value delimiter). It's good practice
--- for flag names to be lowercase ASCII with underscores.
+-- | The name of a flag, can use all valid utf-8 characters but @=@ (the value delimiter). In
+-- general, it's good practice for flag names to be lowercase ASCII with underscores.
 type Name = Text
 
 data Arity = Nullary | Unary deriving Eq
@@ -170,42 +170,59 @@ data FlagError
   | UnknownFlag Name
   deriving (Eq, Show)
 
+-- Pretty-print a 'FlagError'.
+displayFlagError :: FlagError -> Text
+displayFlagError (InconsistentFlagValues name) = "inconsistent values for --" <> name
+displayFlagError (InvalidFlagValue name val msg) =
+  "invalid value \"" <> val <> "\" for --" <> name <> " (" <> T.pack msg <> ")"
+displayFlagError (InvalidParser (DuplicateFlag name)) =
+  "--" <> name <> " was declared multiple times"
+displayFlagError (InvalidParser Empty) = "parser is empty"
+displayFlagError (MissingFlag name) = "--" <> name <> " is required but was not set"
+displayFlagError (MissingFlagValue name) = "missing value for --" <> name
+displayFlagError (UnexpectedFlags names) =
+  "unexpected " <> (T.intercalate " " $ fmap ("--" <>) $ toList $ names)
+displayFlagError (UnknownFlag name) = "undeclared --" <> name
+
 -- Tries to gather all raw flag values into a map.
-gatherValues :: Map Name Flag -> [Text] -> Either FlagError ((Map Name Text), [Text])
+gatherValues :: Map Name Flag -> [String] -> Either FlagError ((Map Name Text), [String])
 gatherValues flags = go where
   go [] = Right (Map.empty, [])
-  go (token:tokens) = case T.stripPrefix "--" token of
-    Nothing -> second (token:) <$> go tokens
-    Just "" -> Right (Map.empty, tokens)
-    Just suffix ->
-      let
-        (name, pval) = T.breakOn "=" suffix
-        missing = Left $ MissingFlagValue name
-        insert val tokens' = do
-          (vals', args') <- go tokens'
-          case Map.lookup name vals' of
-            Nothing -> Right (Map.insert name val vals', args')
-            Just val' -> if val == val'
-              then Right (vals', args')
-              else Left $ InconsistentFlagValues name
-      in case Map.lookup name flags of
-        Nothing -> Left (UnknownFlag name)
-        Just (Flag Nullary _) -> insert "" tokens
-        Just (Flag Unary _) -> case T.uncons pval of
-          Nothing -> case tokens of
-            (token':tokens') -> if T.isPrefixOf "--" token'
-              then missing
-              else insert token' tokens'
-            _ -> missing
-          Just (_, val) -> insert val tokens
+  go (token:tokens) = if not (isPrefixOf "--" token)
+    then second (token:) <$> go tokens
+    else
+      let entry = drop 2 token :: String
+      in if entry == ""
+        then Right (Map.empty, tokens)
+        else
+          let
+            (name, pval) = T.breakOn "=" (T.pack entry)
+            missing = Left $ MissingFlagValue name
+            insert val tokens' = do
+              (vals', args') <- go tokens'
+              case Map.lookup name vals' of
+                Nothing -> Right (Map.insert name val vals', args')
+                Just val' -> if val == val'
+                  then Right (vals', args')
+                  else Left $ InconsistentFlagValues name
+          in case Map.lookup name flags of
+            Nothing -> Left (UnknownFlag name)
+            Just (Flag Nullary _) -> insert "" tokens
+            Just (Flag Unary _) -> case T.uncons pval of
+              Nothing -> case tokens of
+                (token':tokens') -> if isPrefixOf "--" token'
+                  then missing
+                  else insert (T.pack token') tokens'
+                _ -> missing
+              Just (_, val) -> insert val tokens
 
 -- | Runs a parser on a list of tokens, returning the parsed flags alongside other non-flag
 -- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
 -- tokens will be considered arguments (even if they look like flags).
-parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [Text])
+parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [String])
 parseFlags parser tokens = case parser of
   Invalid err -> Left $ InvalidParser err
-  Actionable action flags -> case gatherValues flags (fmap T.pack tokens) of
+  Actionable action flags -> case gatherValues flags tokens of
     Left err -> Left err
     Right (values, args) -> case runExcept $ runRWST action values Set.empty of
       Right (res, usedNames, readNames) ->
@@ -216,6 +233,14 @@ parseFlags parser tokens = case parser of
       Left (MissingValue name) -> Left $ MissingFlag name
       Left (InvalidValue name val msg) -> Left $ InvalidFlagValue name val msg
 
+-- | Runs a parser on the system's arguments, or exits with code 1 and prints the relevant error
+-- message in case of failure.
+parseSystemFlagsOrDie :: FlagParser a -> IO (a, [String])
+parseSystemFlagsOrDie parser = parseFlags parser <$> getArgs >>= \case
+  Left err -> die $ T.unpack $ displayFlagError err
+  Right res -> pure res
+
+-- Marke a flag as used. This is useful to check for unexpected flags after parsing is complete.
 useFlag :: Name -> Action ()
 useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
 

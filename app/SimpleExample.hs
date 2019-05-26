@@ -20,6 +20,4 @@ optionsParser = Options <$> textFlag "root" "path to the root"
                         <*> (optional $ textFlag "context" "")
 
 main :: IO ()
-main = do
-  args <- getArgs
-  print $ parseFlags optionsParser args
+main = parseSystemFlagsOrDie optionsParser >>= print
