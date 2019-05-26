@@ -12,7 +12,6 @@
 --
 -- import Control.Applicative ((\<|\>), optional)
 -- import Data.Text (Text)
--- import Data.Text.Read (decimal)
 -- import Flags.Applicative
 --
 -- data Options = Options
@@ -23,7 +22,7 @@
 --
 -- optionsParser :: FlagParser Options
 -- optionsParser = Options \<$\> textFlag "root" "path to the root"
---                         \<*\> (numericFlag decimal "log_level" "" \<|\> pure 0)
+--                         \<*\> (flag "log_level" "" \<|\> pure 0)
 --                         \<*\> (optional $ textFlag "context" "")
 --
 -- main :: IO ()
@@ -35,12 +34,12 @@
 -- TODO: Add @--help@ support.
 
 module Flags.Applicative
-  ( Name, FlagParser, FlagError(..), ParserError(..)
+  ( Name, Description, FlagParser, FlagError(..)
   , parseFlags, parseSystemFlagsOrDie
   -- * Nullary flags
   , boolFlag
   -- * Unary flags
-  , unaryFlag, textFlag, numericFlag
+  , unaryFlag, textFlag, flag, repeatedTextFlag, repeatedFlag
   ) where
 
 import Control.Applicative ((<|>), Alternative, empty, optional)
@@ -64,14 +63,17 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import qualified Data.Text.Read as T
+import Text.Read (readEither)
 
 -- | The name of a flag, can use all valid utf-8 characters but @=@ (the value delimiter). In
 -- general, it's good practice for flag names to be lowercase ASCII with underscores.
 type Name = Text
 
+-- | An human-readable explanation of what the flag does.
+type Description = Text
+
 data Arity = Nullary | Unary deriving Eq
-data Flag = Flag Arity Text
+data Flag = Flag Arity Description
 
 -- The errors which can happen during flag parsing.
 data ValueError
@@ -85,10 +87,10 @@ type Action a = RWST
   (Except ValueError) -- Eventual parsing error.
   a
 
--- | Parser definition errors.
+-- Parser definition errors.
 data ParserError
-  = DuplicateFlag Name -- ^ The same flag name was declared multiple times.
-  | Empty -- ^ The parser is empty (this should not happen if you use standard combinators).
+  = Duplicate Name
+  | Empty
   deriving (Eq, Show)
 
 -- | Flags parser.
@@ -122,7 +124,7 @@ instance Applicative FlagParser where
   _ <*> Invalid err = Invalid err
   Actionable action1 flags1 <*> Actionable action2 flags2 =
     case mergeFlags flags1 flags2 of
-      Left name -> Invalid $ DuplicateFlag name
+      Left name -> Invalid $ Duplicate name
       Right flags -> Actionable (action1 <*> action2) flags
 
 instance Alternative FlagParser where
@@ -133,7 +135,7 @@ instance Alternative FlagParser where
   Invalid err <|> _ = Invalid err
   _ <|> Invalid err = Invalid err
   Actionable action1 flags1 <|> Actionable action2 flags2 = case mergeFlags flags1 flags2 of
-    Left name -> Invalid $ DuplicateFlag name
+    Left name -> Invalid $ Duplicate name
     Right flags -> Actionable action flags where
       wrap action = catchError (Just <$> action) $ \case
         (MissingValue _) -> pure Nothing
@@ -150,13 +152,14 @@ instance Alternative FlagParser where
 
 -- | The possible parsing errors.
 data FlagError
+  -- | A flag was declared multiple times.
+  = DuplicateFlag Name
+  -- | The parser is empty (this should not happen if you use standard combinators).
+  | EmptyParser
   -- | At least one unary flag was specified multiple times with different values.
-  = InconsistentFlagValues Name
+  | InconsistentFlagValues Name
   -- | A unary flag's value failed to parse.
   | InvalidFlagValue Name Text String
-  -- | The parser is invalid. Unlike other 'FlagError' constructors, this indicates an issue with
-  -- the parser's declaration (rather than the input tokens).
-  | InvalidParser ParserError
   -- | A required flag was missing.
   | MissingFlag Name
   -- | A unary flag was missing a value. This can happen either if a value-less unary flag was the
@@ -175,9 +178,8 @@ displayFlagError :: FlagError -> Text
 displayFlagError (InconsistentFlagValues name) = "inconsistent values for --" <> name
 displayFlagError (InvalidFlagValue name val msg) =
   "invalid value \"" <> val <> "\" for --" <> name <> " (" <> T.pack msg <> ")"
-displayFlagError (InvalidParser (DuplicateFlag name)) =
-  "--" <> name <> " was declared multiple times"
-displayFlagError (InvalidParser Empty) = "parser is empty"
+displayFlagError (DuplicateFlag name) = "--" <> name <> " was declared multiple times"
+displayFlagError EmptyParser = "parser is empty"
 displayFlagError (MissingFlag name) = "--" <> name <> " is required but was not set"
 displayFlagError (MissingFlagValue name) = "missing value for --" <> name
 displayFlagError (UnexpectedFlags names) =
@@ -221,7 +223,8 @@ gatherValues flags = go where
 -- tokens will be considered arguments (even if they look like flags).
 parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [String])
 parseFlags parser tokens = case parser of
-  Invalid err -> Left $ InvalidParser err
+  Invalid Empty -> Left $ EmptyParser
+  Invalid (Duplicate name) -> Left $ DuplicateFlag name
   Actionable action flags -> case gatherValues flags tokens of
     Left err -> Left err
     Right (values, args) -> case runExcept $ runRWST action values Set.empty of
@@ -245,7 +248,7 @@ useFlag :: Name -> Action ()
 useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
 
 -- | Returns a nullary parser with the given name and description.
-boolFlag :: Name -> Text -> FlagParser Bool
+boolFlag :: Name -> Description -> FlagParser Bool
 boolFlag name desc = Actionable action flags where
   action = do
     present <- asks (Map.member name)
@@ -254,7 +257,7 @@ boolFlag name desc = Actionable action flags where
   flags = Map.singleton name (Flag Nullary desc)
 
 -- | Returns a unary parser using the given parsing function, name, and description.
-unaryFlag :: (Text -> Either String a) -> Name -> Text -> FlagParser a
+unaryFlag :: (Text -> Either String a) -> Name -> Description -> FlagParser a
 unaryFlag convert name desc = Actionable action flags where
   action = do
     useFlag name
@@ -265,15 +268,19 @@ unaryFlag convert name desc = Actionable action flags where
         Right res -> pure res
   flags = Map.singleton name (Flag Unary desc)
 
--- | Returns a flag with 'Text' values.
-textFlag :: Name -> Text -> FlagParser Text
+-- | Returns a parser for a single text value.
+textFlag :: Name -> Description -> FlagParser Text
 textFlag = unaryFlag Right
 
--- | Returns a flag which can parse numbers using the helper methods in "Data.Text.Read" (e.g.
--- 'Data.Text.Read.decimal').
-numericFlag :: T.Reader a -> Name -> Text -> FlagParser a
-numericFlag reader = unaryFlag go where
-  go val = case reader val of
-    Right (res, "") -> Right res
-    Left msg -> Left msg
-    _ -> Left "trailing value data"
+-- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
+-- since 'flag'  will expect its values to be double-quoted and might not work as expected.
+flag :: Read a => Name -> Description -> FlagParser a
+flag = unaryFlag (readEither . T.unpack)
+
+-- | Returns a parser for a multiple text value.
+repeatedTextFlag :: Text -> Name -> Description -> FlagParser [Text]
+repeatedTextFlag sep =  unaryFlag $ Right . T.splitOn sep
+
+-- | Returns a parser for multiple values with a 'Read' instance, with a configurable separator.
+repeatedFlag :: Read a => Text -> Name -> Description -> FlagParser [a]
+repeatedFlag sep = unaryFlag $ sequenceA . fmap (readEither . T.unpack) . T.splitOn sep

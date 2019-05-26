@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 import Control.Applicative ((<|>))
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Text.Read (decimal)
 import Flags.Applicative
 import Test.Hspec
 import Test.Hspec.QuickCheck
@@ -19,7 +19,7 @@ main = hspec $ do
       let
         parser = (,) <$> textFlag "foo" "" <*> textFlag "foo" ""
         res = parseFlags parser []
-      res `shouldBe` Left (InvalidParser $ DuplicateFlag "foo")
+      res `shouldBe` Left (DuplicateFlag "foo")
     it "should fail on unknown flags" $ do
       let
         parser = textFlag "foo" ""
@@ -32,8 +32,8 @@ main = hspec $ do
       res `shouldBe` Left (UnexpectedFlags ("foo" :| []))
     it "should branch correctly with unary flags" $ do
       let
-        parser = (Right <$> textFlag "ok" "") <|> (Left <$> textFlag "fail" "")
-        res = parseFlags parser ["--ok", "yes", "no"]
+        parser = (Right <$> flag @String "ok" "") <|> (Left <$> flag @String "fail" "")
+        res = parseFlags parser ["--ok", "\"yes\"", "no"]
       res `shouldBe` Right (Right "yes", ["no"])
     it "should branch correctly with nullary flags" $ do
       let
@@ -47,6 +47,6 @@ main = hspec $ do
       res `shouldBe` Left (InconsistentFlagValues "foo")
     it "should support the same flag value multiple times" $ do
       let
-        parser = numericFlag decimal "foo" "" :: FlagParser Int
+        parser = flag @Int "foo" ""
         res = parseFlags parser ["--foo=1", "--foo=1"]
       res `shouldBe` Right (1, [])
