@@ -17,9 +17,9 @@ data Options = Options
 
 optionsParser :: FlagParser Options
 optionsParser = Options <$> (textFlag "root" "path to the root" <|> textFlag "url" "")
-                        <*> (flag "log_level" "" <|> pure 0)
+                        <*> (autoFlag "log_level" "" <|> pure 0)
                         <*> (optional $ textFlag "context" "")
-                        <*> (repeatedFlag "," "values" "" <|> pure [])
+                        <*> (autoListFlag "," "values" "" <|> pure [])
 
 main :: IO ()
 main = parseSystemFlagsOrDie optionsParser >>= print

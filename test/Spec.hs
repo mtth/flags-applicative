@@ -32,7 +32,7 @@ main = hspec $ do
       res `shouldBe` Left (UnexpectedFlags ("foo" :| []))
     it "should branch correctly with unary flags" $ do
       let
-        parser = (Right <$> flag @String "ok" "") <|> (Left <$> flag @String "fail" "")
+        parser = (Right <$> autoFlag @String "ok" "") <|> (Left <$> autoFlag @String "fail" "")
         res = parseFlags parser ["--ok", "\"yes\"", "no"]
       res `shouldBe` Right (Right "yes", ["no"])
     it "should branch correctly with nullary flags" $ do
@@ -47,6 +47,11 @@ main = hspec $ do
       res `shouldBe` Left (InconsistentFlagValues "foo")
     it "should support the same flag value multiple times" $ do
       let
-        parser = flag @Int "foo" ""
+        parser = autoFlag @Int "foo" ""
         res = parseFlags parser ["--foo=1", "--foo=1"]
       res `shouldBe` Right (1, [])
+    it "should support text lists" $ do
+      let
+        parser = textListFlag "," "bar" ""
+        res = parseFlags parser ["--bar=a,b,c", "def"]
+      res `shouldBe` Right (["a", "b", "c"], ["def"])
