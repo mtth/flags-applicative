@@ -39,23 +39,21 @@ module Flags.Applicative
   , switch, boolFlag, flag, textFlag, autoFlag, textListFlag, autoListFlag
   ) where
 
-import Control.Applicative ((<|>), Alternative, empty, optional)
+import Control.Applicative ((<|>), Alternative, empty)
 import Control.Monad (when)
 import Control.Monad.Except (Except, catchError, runExcept, throwError)
 import Control.Monad.RWS.Strict (RWST, runRWST)
 import Control.Monad.Reader (asks)
 import Control.Monad.State.Strict (get, modify, put)
-import Data.Bifunctor (first, second)
+import Data.Bifunctor (second)
 import Data.Foldable (foldl', toList)
 import Data.List (isPrefixOf)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map.Strict (Map)
-import Data.Maybe (isJust)
 import Data.Set (Set)
 import Data.Text (Text)
 import System.Exit (die)
 import System.Environment (getArgs)
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -188,7 +186,7 @@ instance Alternative FlagParser where
     case mergeFlags flags1 flags2 of
       Left name -> Invalid $ Duplicate name
       Right flags -> Actionable action flags (usage1 `orElse` usage2) where
-        wrap action = catchError (Just <$> action) $ \case
+        wrap a = catchError (Just <$> a) $ \case
           (MissingValue _) -> pure Nothing
           err -> throwError err
         action = do
