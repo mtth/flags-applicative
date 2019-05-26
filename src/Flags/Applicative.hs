@@ -67,6 +67,10 @@ import Text.Read (readEither)
 -- general, it's good practice for flag names to be lowercase ASCII with underscores.
 type Name = Text
 
+-- The name of the help switch.
+helpName :: Name
+helpName = "help"
+
 -- | An human-readable explanation of what the flag does.
 type Description = Text
 
@@ -84,6 +88,41 @@ type Action a = RWST
   (Set Name) -- Used flags.
   (Except ValueError) -- Eventual parsing error.
   a
+
+data Usage
+  = Exactly Name
+  | AllOf (Set Usage)
+  | OneOf (Set Usage)
+  deriving (Eq, Ord)
+
+emptyUsage :: Usage
+emptyUsage = AllOf Set.empty
+
+andAlso :: Usage -> Usage -> Usage
+andAlso (AllOf s1) (AllOf s2) = AllOf $ s1 <> s2
+andAlso (AllOf s) u = AllOf $ Set.insert u s
+andAlso u (AllOf s) = AllOf $ Set.insert u s
+andAlso u1 u2 = AllOf $ Set.fromList [u1, u2]
+
+orElse :: Usage -> Usage -> Usage
+orElse (OneOf s1) (OneOf s2) = OneOf $ s1 <> s2
+orElse (OneOf s) u = OneOf $ Set.insert u s
+orElse u (OneOf s) = OneOf $ Set.insert u s
+orElse u1 u2 = OneOf $ Set.fromList [u1, u2]
+
+displayUsage :: Map Name Flag -> Usage -> Text
+displayUsage flags (Exactly name) =
+  let prefix = "--" <> name
+  in case Map.lookup name flags of
+    Just (Flag Unary _) -> prefix <> "=*"
+    _ -> prefix
+displayUsage flags (AllOf s) =
+  T.intercalate " " $ fmap (displayUsage flags) $ filter (/= emptyUsage) $ toList s
+displayUsage flags (OneOf s) =
+  let contents s' = T.intercalate "|" $ fmap (displayUsage flags) $ toList $ s'
+  in if Set.member emptyUsage s
+    then "[" <> contents (Set.delete emptyUsage s) <> "]"
+    else "(" <> contents s <> ")"
 
 -- Parser definition errors.
 data ParserError
@@ -104,7 +143,7 @@ data ParserError
 --
 -- You can run a parser using 'parseFlags'.
 data FlagParser a
-  = Actionable (Action a) (Map Name Flag)
+  = Actionable (Action a) (Map Name Flag) Usage
   | Invalid ParserError
   deriving Functor
 
@@ -116,14 +155,14 @@ mergeFlags flags1 flags2 = case Map.minViewWithKey $ flags1 `Map.intersection` f
   Nothing -> Right $ flags1 `Map.union` flags2
 
 instance Applicative FlagParser where
-  pure res = Actionable (pure res) Map.empty
+  pure res = Actionable (pure res) Map.empty emptyUsage
 
   Invalid err <*> _ = Invalid err
   _ <*> Invalid err = Invalid err
-  Actionable action1 flags1 <*> Actionable action2 flags2 =
+  Actionable action1 flags1 usage1 <*> Actionable action2 flags2 usage2 =
     case mergeFlags flags1 flags2 of
       Left name -> Invalid $ Duplicate name
-      Right flags -> Actionable (action1 <*> action2) flags
+      Right flags -> Actionable (action1 <*> action2) flags (usage1 `andAlso` usage2)
 
 instance Alternative FlagParser where
   empty = Invalid Empty
@@ -132,28 +171,29 @@ instance Alternative FlagParser where
   parser <|> Invalid Empty = parser
   Invalid err <|> _ = Invalid err
   _ <|> Invalid err = Invalid err
-  Actionable action1 flags1 <|> Actionable action2 flags2 = case mergeFlags flags1 flags2 of
-    Left name -> Invalid $ Duplicate name
-    Right flags -> Actionable action flags where
-      wrap action = catchError (Just <$> action) $ \case
-        (MissingValue _) -> pure Nothing
-        err -> throwError err
-      action = do
-        used <- get
-        wrap action1 >>= \case
-          Nothing -> put used >> action2
-          Just res -> do
-            used' <- get
-            _ <- wrap action2
-            put used'
-            pure res
+  Actionable action1 flags1 usage1 <|> Actionable action2 flags2 usage2 =
+    case mergeFlags flags1 flags2 of
+      Left name -> Invalid $ Duplicate name
+      Right flags -> Actionable action flags (usage1 `orElse` usage2) where
+        wrap action = catchError (Just <$> action) $ \case
+          (MissingValue _) -> pure Nothing
+          err -> throwError err
+        action = do
+          used <- get
+          wrap action1 >>= \case
+            Nothing -> put used >> action2
+            Just res -> do
+              used' <- get
+              _ <- wrap action2
+              put used'
+              pure res
 
 -- | The possible parsing errors.
 data FlagError
   -- | A flag was declared multiple times.
   = DuplicateFlag Name
-  -- | The parser is empty (this should not happen if you use standard combinators).
-  | EmptyParser
+  -- | The input included the @--help@ flag.
+  | Help Text
   -- | At least one unary flag was specified multiple times with different values.
   | InconsistentFlagValues Name
   -- | A unary flag's value failed to parse.
@@ -177,12 +217,59 @@ displayFlagError (InconsistentFlagValues name) = "inconsistent values for --" <>
 displayFlagError (InvalidFlagValue name val msg) =
   "invalid value \"" <> val <> "\" for --" <> name <> " (" <> T.pack msg <> ")"
 displayFlagError (DuplicateFlag name) = "--" <> name <> " was declared multiple times"
-displayFlagError EmptyParser = "parser is empty"
+displayFlagError (Help usage) = "usage: " <> usage
 displayFlagError (MissingFlag name) = "--" <> name <> " is required but was not set"
 displayFlagError (MissingFlagValue name) = "missing value for --" <> name
 displayFlagError (UnexpectedFlags names) =
   "unexpected " <> (T.intercalate " " $ fmap ("--" <>) $ toList $ names)
 displayFlagError (UnknownFlag name) = "undeclared --" <> name
+
+-- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
+useFlag :: Name -> Action ()
+useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
+
+-- | Returns a nullary parser with the given name and description.
+switch :: Name -> Description -> FlagParser Bool
+switch name desc = Actionable action flags usage where
+  action = do
+    present <- asks (Map.member name)
+    when present $ useFlag name
+    pure present
+  flags = Map.singleton name (Flag Nullary desc)
+  usage = emptyUsage `orElse` Exactly name
+
+-- | Returns a unary parser using the given parsing function, name, and description.
+unaryFlag :: (Text -> Either String a) -> Name -> Description -> FlagParser a
+unaryFlag convert name desc = Actionable action flags usage where
+  action = do
+    useFlag name
+    asks (Map.lookup name) >>= \case
+      Nothing -> throwError $ MissingValue name
+      Just val -> case convert val of
+        Left err -> throwError $ InvalidValue name val err
+        Right res -> pure res
+  flags = Map.singleton name (Flag Unary desc)
+  usage = Exactly name
+
+-- | Returns a parser for a single text value.
+textFlag :: Name -> Description -> FlagParser Text
+textFlag = unaryFlag Right
+
+-- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
+-- since 'flag'  will expect its values to be double-quoted and might not work as expected.
+flag :: Read a => Name -> Description -> FlagParser a
+flag = unaryFlag (readEither . T.unpack)
+
+-- | Returns a parser for a multiple text value.
+repeatedTextFlag :: Text -> Name -> Description -> FlagParser [Text]
+repeatedTextFlag sep =  unaryFlag $ Right . T.splitOn sep
+
+-- | Returns a parser for multiple values with a 'Read' instance, with a configurable separator.
+repeatedFlag :: Read a => Text -> Name -> Description -> FlagParser [a]
+repeatedFlag sep = unaryFlag $ sequenceA . fmap (readEither . T.unpack) . T.splitOn sep
+
+helpSwitch :: FlagParser Bool
+helpSwitch = switch helpName "show usage and exit"
 
 -- Tries to gather all raw flag values into a map.
 gatherValues :: Map Name Flag -> [String] -> Either FlagError ((Map Name Text), [String])
@@ -220,19 +307,20 @@ gatherValues flags = go where
 -- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
 -- tokens will be considered arguments (even if they look like flags).
 parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [String])
-parseFlags parser tokens = case parser of
-  Invalid Empty -> Left $ EmptyParser
+parseFlags parser tokens = case (,) <$> helpSwitch <*> parser of
   Invalid (Duplicate name) -> Left $ DuplicateFlag name
-  Actionable action flags -> case gatherValues flags tokens of
+  Actionable action flags usage -> case gatherValues flags tokens of
     Left err -> Left err
     Right (values, args) -> case runExcept $ runRWST action values Set.empty of
-      Right (res, usedNames, readNames) ->
+      Right ((True, _), _, _) -> Left $ Help $ displayUsage flags usage
+      Right ((False, res), usedNames, readNames) ->
         let unused = Set.difference readNames usedNames
         in case Set.minView unused of
           Nothing -> Right (res, args)
           Just (name, names) -> Left $ UnexpectedFlags $ name :| toList names
       Left (MissingValue name) -> Left $ MissingFlag name
       Left (InvalidValue name val msg) -> Left $ InvalidFlagValue name val msg
+  _ -> error "unreachable" -- The parser can never be empty.
 
 -- | Runs a parser on the system's arguments, or exits with code 1 and prints the relevant error
 -- message in case of failure.
@@ -240,45 +328,3 @@ parseSystemFlagsOrDie :: FlagParser a -> IO (a, [String])
 parseSystemFlagsOrDie parser = parseFlags parser <$> getArgs >>= \case
   Left err -> die $ T.unpack $ displayFlagError err
   Right res -> pure res
-
--- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
-useFlag :: Name -> Action ()
-useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
-
--- | Returns a nullary parser with the given name and description.
-switch :: Name -> Description -> FlagParser Bool
-switch name desc = Actionable action flags where
-  action = do
-    present <- asks (Map.member name)
-    when present $ useFlag name
-    pure present
-  flags = Map.singleton name (Flag Nullary desc)
-
--- | Returns a unary parser using the given parsing function, name, and description.
-unaryFlag :: (Text -> Either String a) -> Name -> Description -> FlagParser a
-unaryFlag convert name desc = Actionable action flags where
-  action = do
-    useFlag name
-    asks (Map.lookup name) >>= \case
-      Nothing -> throwError $ MissingValue name
-      Just val -> case convert val of
-        Left err -> throwError $ InvalidValue name val err
-        Right res -> pure res
-  flags = Map.singleton name (Flag Unary desc)
-
--- | Returns a parser for a single text value.
-textFlag :: Name -> Description -> FlagParser Text
-textFlag = unaryFlag Right
-
--- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
--- since 'flag'  will expect its values to be double-quoted and might not work as expected.
-flag :: Read a => Name -> Description -> FlagParser a
-flag = unaryFlag (readEither . T.unpack)
-
--- | Returns a parser for a multiple text value.
-repeatedTextFlag :: Text -> Name -> Description -> FlagParser [Text]
-repeatedTextFlag sep =  unaryFlag $ Right . T.splitOn sep
-
--- | Returns a parser for multiple values with a 'Read' instance, with a configurable separator.
-repeatedFlag :: Read a => Text -> Name -> Description -> FlagParser [a]
-repeatedFlag sep = unaryFlag $ sequenceA . fmap (readEither . T.unpack) . T.splitOn sep

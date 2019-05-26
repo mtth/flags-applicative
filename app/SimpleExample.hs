@@ -16,7 +16,7 @@ data Options = Options
   } deriving Show
 
 optionsParser :: FlagParser Options
-optionsParser = Options <$> textFlag "root" "path to the root"
+optionsParser = Options <$> (textFlag "root" "path to the root" <|> textFlag "url" "")
                         <*> (flag "log_level" "" <|> pure 0)
                         <*> (optional $ textFlag "context" "")
                         <*> (repeatedFlag "," "values" "" <|> pure [])
