@@ -61,6 +61,10 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import Text.Read (readEither)
 
+-- The prefix used to identify all flags.
+prefix :: String
+prefix = "--"
+
 -- | The name of a flag (without the @--@ prefix). Names can use all valid utf-8 characters except
 -- @=@ (the value delimiter). In general, it's good practice for flag names to be lowercase ASCII
 -- with underscores.
@@ -73,6 +77,10 @@ import Text.Read (readEither)
 -- cause an error during parsing.
 -- * @swallowed_switches@, similar to @swallowed_flags@ but for switches (nullary flags).
 type Name = Text
+
+-- Add the flag prefix to a name.
+qualify :: Name -> Text
+qualify name = T.pack prefix <> name
 
 -- | An human-readable explanation of what the flag does.
 type Description = Text
@@ -116,11 +124,9 @@ orElse u1 u2 = OneOf $ Set.fromList [u1, u2]
 
 displayUsage :: Map Name Flag -> Usage -> Text
 displayUsage flags usage = "usage: " <> go usage <> "\n" <> details where
-  go (Exactly name) =
-    let prefix = "--" <> name
-    in case Map.lookup name flags of
-      Just (Flag Unary _) -> prefix <> "=*"
-      _ -> prefix
+  go (Exactly name) = case Map.lookup name flags of
+    Just (Flag Unary _) -> qualify name <> "=*"
+    _ -> qualify name
   go (AllOf s) =
     T.intercalate " " $ fmap go $ filter (/= emptyUsage) $ toList s
   go (OneOf s) =
@@ -128,9 +134,7 @@ displayUsage flags usage = "usage: " <> go usage <> "\n" <> details where
     in if Set.member emptyUsage s
       then "[" <> contents (Set.delete emptyUsage s) <> "]"
       else "(" <> contents s <> ")"
-  describe (name, Flag _ desc) =
-    let prefix = "--" <> name
-    in if T.null desc then "" else "\n" <> prefix <> "\t" <> desc
+  describe (name, Flag _ desc) = if T.null desc then "" else "\n" <> qualify name <> "\t" <> desc
   details = T.concat $ fmap describe $ Map.toList flags
 
 -- Parser definition errors.
@@ -201,8 +205,6 @@ instance Alternative FlagParser where
 data FlagError
   -- | A flag was declared multiple times.
   = DuplicateFlag Name
-  -- | A flag with a reserved name was declared.
-  | ReservedFlag Name
   -- | The parser was empty.
   | EmptyParser
   -- | The input included the @--help@ flag.
@@ -217,6 +219,8 @@ data FlagError
   -- last token or was followed by a value which is also a flag name (in which case you should use
   -- the single-token form: @--flag=--value@).
   | MissingFlagValue Name
+  -- | A flag with a reserved name was declared.
+  | ReservedFlag Name
   -- | At least one flag was set but unused. This can happen when optional flags are set but their
   -- branch is not selected.
   | UnexpectedFlags (NonEmpty Name)
@@ -226,26 +230,26 @@ data FlagError
 
 -- Pretty-print a 'FlagError'.
 displayFlagError :: FlagError -> Text
-displayFlagError (DuplicateFlag name) = "--" <> name <> " was declared multiple times"
-displayFlagError (ReservedFlag name) = "--" <> name <> " was declared but is reserved"
+displayFlagError (DuplicateFlag name) = qualify name <> " was declared multiple times"
 displayFlagError EmptyParser = "empty parser"
 displayFlagError (Help usage) = usage
-displayFlagError (InconsistentFlagValues name) = "inconsistent values for --" <> name
+displayFlagError (InconsistentFlagValues name) = "inconsistent values for " <> qualify name
 displayFlagError (InvalidFlagValue name val msg) =
-  "invalid value \"" <> val <> "\" for --" <> name <> " (" <> T.pack msg <> ")"
-displayFlagError (MissingFlag name) = "--" <> name <> " is required but was not set"
-displayFlagError (MissingFlagValue name) = "missing value for --" <> name
+  "invalid value \"" <> val <> "\" for " <> qualify name <> " (" <> T.pack msg <> ")"
+displayFlagError (MissingFlag name) = qualify name <> " is required but was not set"
+displayFlagError (MissingFlagValue name) = "missing value for " <> qualify name
+displayFlagError (ReservedFlag name) = qualify name <> " was declared but is reserved"
 displayFlagError (UnexpectedFlags names) =
-  "unexpected " <> (T.intercalate " " $ fmap ("--" <>) $ toList $ names)
-displayFlagError (UnknownFlag name) = "undeclared --" <> name
+  "unexpected " <> (T.intercalate " " $ fmap qualify $ toList $ names)
+displayFlagError (UnknownFlag name) = "undeclared " <> qualify name
 
 -- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
 useFlag :: Name -> Action ()
 useFlag name = tell (Set.singleton name) >> modify (Set.insert name)
 
--- Returns a nullary parser with the given name and description.
-nullaryFlag :: Bool -> Name -> Description -> FlagParser Bool
-nullaryFlag private name desc = Actionable action flags usage where
+-- | Returns a parser with the given name and description for a flag with no value.
+switch :: Name -> Description -> FlagParser Bool
+switch name desc = Actionable action flags usage where
   action = do
     present <- asks (Map.member name)
     when present $ useFlag name
@@ -253,13 +257,10 @@ nullaryFlag private name desc = Actionable action flags usage where
   flags = Map.singleton name (Flag Nullary desc)
   usage = emptyUsage `orElse` Exactly name
 
--- | Returns a parser with the given name and description for a flag with no value.
-switch :: Name -> Description -> FlagParser Bool
-switch = nullaryFlag False
-
--- | Returns a unary parser using the given parsing function, name, and description.
-unaryFlag :: Bool -> (Text -> Either String a) -> Name -> Description -> FlagParser a
-unaryFlag private convert name desc = Actionable action flags usage where
+-- | Returns a parser using the given parsing function, name, and description for a flag with an
+-- associated value.
+flag :: (Text -> Either String a) -> Name -> Description -> FlagParser a
+flag convert name desc = Actionable action flags usage where
   action = do
     useFlag name
     asks (Map.lookup name) >>= \case
@@ -269,11 +270,6 @@ unaryFlag private convert name desc = Actionable action flags usage where
         Right res -> pure res
   flags = Map.singleton name (Flag Unary desc)
   usage = Exactly name
-
--- | Returns a parser using the given parsing function, name, and description for a flag with an
--- associated value.
-flag :: (Text -> Either String a) -> Name -> Description -> FlagParser a
-flag = unaryFlag False -- TODO: Consolidate back with 'unaryFlag'.
 
 -- | Returns a parser for a single text value.
 textFlag :: Name -> Description -> FlagParser Text
@@ -298,7 +294,7 @@ autoListFlag sep = flag $ sequenceA . fmap (readEither . T.unpack) . T.splitOn s
 gatherValues :: Bool -> Map Name Flag -> [String] -> Either FlagError ((Map Name Text), [String])
 gatherValues ignoreUnknown flags = go where
   go [] = Right (Map.empty, [])
-  go (token:tokens) = if not (isPrefixOf "--" token)
+  go (token:tokens) = if not (prefix `isPrefixOf` token)
     then second (token:) <$> go tokens
     else
       let entry = drop 2 token :: String
@@ -322,7 +318,7 @@ gatherValues ignoreUnknown flags = go where
             Just (Flag Nullary _) -> insert "" tokens
             Just (Flag Unary _) -> case T.uncons pval of
               Nothing -> case tokens of
-                (token':tokens') -> if isPrefixOf "--" token'
+                (token':tokens') -> if prefix `isPrefixOf` token'
                   then missing
                   else insert (T.pack token') tokens'
                 _ -> missing
