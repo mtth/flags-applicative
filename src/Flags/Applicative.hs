@@ -65,6 +65,11 @@ import Text.Read (readEither)
 
 -- | The name of a flag, can use all valid utf-8 characters but @=@ (the value delimiter). In
 -- general, it's good practice for flag names to be lowercase ASCII with underscores.
+--
+-- The following names are reserved and attempting to define a flag with the same name will cause an
+-- error:
+--
+-- * @help@, used to display usage when set.
 type Name = Text
 
 -- The name of the help switch.
@@ -111,18 +116,23 @@ orElse u (OneOf s) = OneOf $ Set.insert u s
 orElse u1 u2 = OneOf $ Set.fromList [u1, u2]
 
 displayUsage :: Map Name Flag -> Usage -> Text
-displayUsage flags (Exactly name) =
-  let prefix = "--" <> name
-  in case Map.lookup name flags of
-    Just (Flag Unary _) -> prefix <> "=*"
-    _ -> prefix
-displayUsage flags (AllOf s) =
-  T.intercalate " " $ fmap (displayUsage flags) $ filter (/= emptyUsage) $ toList s
-displayUsage flags (OneOf s) =
-  let contents s' = T.intercalate "|" $ fmap (displayUsage flags) $ toList $ s'
-  in if Set.member emptyUsage s
-    then "[" <> contents (Set.delete emptyUsage s) <> "]"
-    else "(" <> contents s <> ")"
+displayUsage flags usage = "usage: " <> go usage <> "\n" <> details where
+  go (Exactly name) =
+    let prefix = "--" <> name
+    in case Map.lookup name flags of
+      Just (Flag Unary _) -> prefix <> "=*"
+      _ -> prefix
+  go (AllOf s) =
+    T.intercalate " " $ fmap go $ filter (/= emptyUsage) $ toList s
+  go (OneOf s) =
+    let contents s' = T.intercalate "|" $ fmap go $ toList $ s'
+    in if Set.member emptyUsage s
+      then "[" <> contents (Set.delete emptyUsage s) <> "]"
+      else "(" <> contents s <> ")"
+  describe (name, Flag _ desc) =
+    let prefix = "--" <> name
+    in if T.null desc then "" else "\n" <> prefix <> "\t" <> desc
+  details = T.concat $ fmap describe $ Map.toList flags
 
 -- Parser definition errors.
 data ParserError
@@ -136,8 +146,8 @@ data ParserError
 --
 -- * Nullary flags created with 'switch which are 'True' when set and 'False' otherwise. For example
 -- @--version@ or @--enable_foo@.
--- * Unary flags created with 'unaryFlag' and its convenience variants (e.g. 'textFlag',
--- 'numericFlag'). These expect a value to be passed in either after an equal sign (@--foo=value@)
+-- * Unary flags created with 'unaryFlag' and its convenience variants (e.g. 'textFlag', 'flag',
+-- 'repeatedFlag'). These expect a value to be passed in either after an equal sign (@--foo=value@)
 -- or as the following input value (@--foo value@). If the value starts with @--@, only the first
 -- form is accepted.
 --
@@ -217,7 +227,7 @@ displayFlagError (InconsistentFlagValues name) = "inconsistent values for --" <>
 displayFlagError (InvalidFlagValue name val msg) =
   "invalid value \"" <> val <> "\" for --" <> name <> " (" <> T.pack msg <> ")"
 displayFlagError (DuplicateFlag name) = "--" <> name <> " was declared multiple times"
-displayFlagError (Help usage) = "usage: " <> usage
+displayFlagError (Help usage) = usage
 displayFlagError (MissingFlag name) = "--" <> name <> " is required but was not set"
 displayFlagError (MissingFlagValue name) = "missing value for --" <> name
 displayFlagError (UnexpectedFlags names) =
