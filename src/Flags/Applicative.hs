@@ -199,10 +199,9 @@ gatherValues flags = go where
             _ -> missing
           Just (_, val) -> insert val tokens
 
--- | Runs a parser on a list of tokens, returning the parsed flags alongside
--- other non-flag arguments (i.e. which don't start with @--@). If the special
--- @--@ token is found, all following tokens will be considered arguments (even
--- if they look like flags).
+-- | Runs a parser on a list of tokens, returning the parsed flags alongside other non-flag
+-- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
+-- tokens will be considered arguments (even if they look like flags).
 parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [Text])
 parseFlags parser tokens = case parser of
   Invalid err -> Left $ InvalidParser err
