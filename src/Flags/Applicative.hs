@@ -36,7 +36,7 @@ module Flags.Applicative
   -- * Running parsers
   , parseFlags, parseSystemFlagsOrDie
   -- * Defining flags
-  , switch, boolFlag, flag, textFlag, autoFlag, textListFlag, autoListFlag
+  , switch, boolFlag, flag, textFlag, hostFlag, autoFlag, textListFlag, autoListFlag
   ) where
 
 import Control.Applicative ((<|>), Alternative, empty)
@@ -53,6 +53,7 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Semigroup ((<>))
 import Data.Text (Text)
+import Network.Socket (HostName, PortNumber)
 import System.Exit (die)
 import System.Environment (getArgs)
 import qualified Data.Map.Strict as Map
@@ -282,6 +283,14 @@ flag convert name desc = Actionable action flags usage where
 -- | Returns a parser for a single text value.
 textFlag :: Name -> Description -> FlagParser Text
 textFlag = flag Right
+
+hostFlag :: Name -> Description -> FlagParser (HostName, Maybe PortNumber)
+hostFlag = flag $ \txt -> do
+  let (hostname, suffix) = T.breakOn ":" txt
+  mbPort <- case T.stripPrefix ":" suffix of
+      Nothing -> Right Nothing
+      Just portStr -> Just <$> readEither (T.unpack portStr)
+  pure (T.unpack hostname, mbPort)
 
 -- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
 -- since 'flag'  will expect its values to be double-quoted and might not work as expected.

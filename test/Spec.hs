@@ -81,3 +81,20 @@ main = hspec $ do
         parser = boolFlag "foo" ""
         res = parseFlags parser ["--foo", "--bar=1", "--swallowed_switches=bar"]
       res `shouldBe` Left (UnexpectedFlagValue "bar")
+    it "should parse a hostname" $ do
+      let
+        parser = hostFlag "host" ""
+        res = parseFlags parser ["--host=foo.com"]
+      res `shouldBe` Right (("foo.com", Nothing), [])
+    it "should parse a hostname and a port" $ do
+      let
+        parser = hostFlag "host" ""
+        res = parseFlags parser ["--host=localhost:1234"]
+      res `shouldBe` Right (("localhost", Just 1234), [])
+    it "should fail when given an invalid port" $ do
+      let
+        parser = hostFlag "host" ""
+        res = parseFlags parser ["--host=localhost:1a2"]
+      case res of
+        Left (InvalidFlagValue "host" _ _) -> pure ()
+        _ -> expectationFailure $ show res
