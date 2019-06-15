@@ -3,6 +3,8 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- TODO: Rename FlagParser to FlagsParser
+
 -- | Simple flags parsing module, inspired by @optparse-applicative@.
 --
 -- Sample usage (note the default log level and optional context):
@@ -92,8 +94,11 @@ data Flag = Flag Arity Description
 
 -- The errors which can happen during flag parsing.
 data ValueError
-  = MissingValue Name
-  | InvalidValue Name Text String
+  = InvalidValue Name Text String
+  | MissingValues (NonEmpty Name)
+
+missingValue :: Name -> ValueError
+missingValue name = MissingValues $ name :| []
 
 type Action a = RWST
   (Map Name Text) -- Flag values (or empty for nullary flags).
@@ -188,14 +193,18 @@ instance Alternative FlagParser where
     case mergeFlags flags1 flags2 of
       Left name -> Invalid $ Duplicate name
       Right flags -> Actionable action flags (usage1 `orElse` usage2) where
-        wrap a = catchError (Just <$> a) $ \case
-          (MissingValue _) -> pure Nothing
+        wrap a = catchError (Right <$> a) $ \case
+          (MissingValues names) -> pure $ Left names
           err -> throwError err
         action = do
           used <- get
           wrap action1 >>= \case
-            Nothing -> put used >> action2
-            Just res -> do
+            Left names -> do
+              put used
+              wrap action2 >>= \case
+                Left names' -> throwError $ MissingValues $ names <> names'
+                Right res -> pure res
+            Right res -> do
               used' <- get
               _ <- wrap action2
               put used'
@@ -213,8 +222,8 @@ data FlagError
   | InconsistentFlagValues Name
   -- | A unary flag's value failed to parse.
   | InvalidFlagValue Name Text String
-  -- | A required flag was missing.
-  | MissingFlag Name
+  -- | A required flag was missing; at least one of the returned flags should be set.
+  | MissingFlags (NonEmpty Name)
   -- | A unary flag was missing a value. This can happen either if a value-less unary flag was the
   -- last token or was followed by a value which is also a flag name (in which case you should use
   -- the single-token form: @--flag=--value@).
@@ -230,6 +239,9 @@ data FlagError
   | UnknownFlag Name
   deriving (Eq, Show)
 
+displayFlags :: Foldable f => f Name -> Text
+displayFlags = T.intercalate " " . fmap qualify . toList
+
 -- Pretty-print a 'FlagError'.
 displayFlagError :: FlagError -> Text
 displayFlagError (DuplicateFlag name) = qualify name <> " was declared multiple times"
@@ -238,12 +250,12 @@ displayFlagError (Help usage) = usage
 displayFlagError (InconsistentFlagValues name) = "inconsistent values for " <> qualify name
 displayFlagError (InvalidFlagValue name val msg) =
   "invalid value \"" <> val <> "\" for " <> qualify name <> " (" <> T.pack msg <> ")"
-displayFlagError (MissingFlag name) = qualify name <> " is required but was not set"
+displayFlagError (MissingFlags names) =
+  "at least one of the following required flags must be set: " <> displayFlags names
 displayFlagError (MissingFlagValue name) = "missing value for " <> qualify name
 displayFlagError (ReservedFlag name) = qualify name <> " was declared but is reserved"
 displayFlagError (UnexpectedFlagValue name) = "unexpected value for " <> qualify name
-displayFlagError (UnexpectedFlags names) =
-  "unexpected " <> (T.intercalate " " $ fmap qualify $ toList $ names)
+displayFlagError (UnexpectedFlags names) = "unexpected " <> displayFlags names
 displayFlagError (UnknownFlag name) = "undeclared " <> qualify name
 
 -- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
@@ -257,7 +269,7 @@ switch :: Name -> Description -> FlagParser ()
 switch name desc = Actionable action flags usage where
   action = asks (Map.member name) >>= \case
     True -> useFlag name
-    False -> throwError $ MissingValue name
+    False -> throwError $ missingValue name
   flags = Map.singleton name (Flag Nullary desc)
   usage = Exactly name
 
@@ -273,7 +285,7 @@ flag convert name desc = Actionable action flags usage where
   action = do
     useFlag name
     asks (Map.lookup name) >>= \case
-      Nothing -> throwError $ MissingValue name
+      Nothing -> throwError $ missingValue name
       Just val -> case convert val of
         Left err -> throwError $ InvalidValue name val err
         Right res -> pure res
@@ -354,7 +366,7 @@ runAction ignoreUnknown action flags tokens = case gatherValues ignoreUnknown fl
     Right (rv, usedNames, _) ->
       let unused = Set.difference (Map.keysSet values) usedNames
       in Right (rv, unused, args)
-    Left (MissingValue name) -> Left $ MissingFlag name
+    Left (MissingValues names) -> Left $ MissingFlags names
     Left (InvalidValue name val msg) -> Left $ InvalidFlagValue name val msg
 
 -- Preprocessing parser.

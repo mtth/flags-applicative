@@ -98,3 +98,10 @@ main = hspec $ do
       case res of
         Left (InvalidFlagValue "host" _ _) -> pure ()
         _ -> expectationFailure $ show res
+    it "should report all missing required flags" $ do
+      let
+        parser = switch "foo" "" <|> switch "bar" ""
+        res = parseFlags parser []
+      case res of
+        Left (MissingFlags ("foo" :| ["bar"])) -> pure ()
+        _ -> expectationFailure $ show res
