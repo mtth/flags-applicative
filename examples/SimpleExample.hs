@@ -1,3 +1,6 @@
+#!/usr/bin/env stack
+-- stack --install-ghc runghc --package=flags-applicative
+
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
@@ -16,7 +19,7 @@ data Options = Options
   , context :: Maybe (Text, [Double])
   } deriving Show
 
-optionsParser :: FlagParser Options
+optionsParser :: FlagsParser Options
 optionsParser = Options
   <$> (textFlag "root" "path to the root" <|> ("HERE" <$ switch "default_root" ""))
   <*> autoFlag "log_level" "log verbosity"

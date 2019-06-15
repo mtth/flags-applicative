@@ -3,8 +3,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- TODO: Rename FlagParser to FlagsParser
-
 -- | Simple flags parsing module, inspired by @optparse-applicative@.
 --
 -- Sample usage (note the default log level and optional context):
@@ -22,7 +20,7 @@
 --   , context :: Maybe Text
 --   } deriving Show
 --
--- optionsParser :: FlagParser Options
+-- optionsParser :: FlagsParser Options
 -- optionsParser = Options \<$\> textFlag "root" "path to the root"
 --                         \<*\> (autoFlag "log_level" "" \<|\> pure 0)
 --                         \<*\> (optional $ textFlag "context" "")
@@ -33,13 +31,17 @@
 --   print opts
 -- @
 
-module Flags.Applicative
-  ( Name, Description, FlagParser, FlagError(..)
+module Flags.Applicative (
+  -- * Types
+  Name, Description, FlagsParser, FlagError(..),
   -- * Running parsers
-  , parseFlags, parseSystemFlagsOrDie
-  -- * Defining flags
-  , switch, boolFlag, flag, textFlag, hostFlag, autoFlag, textListFlag, autoListFlag
-  ) where
+  parseFlags, parseSystemFlagsOrDie,
+  -- * Declaring flags
+  -- ** Nullary flags
+  switch, boolFlag,
+  -- ** Unary flags
+  flag, textFlag, hostFlag, autoFlag, textListFlag, autoListFlag
+) where
 
 import Control.Applicative ((<|>), Alternative, empty)
 import Control.Monad (when)
@@ -160,7 +162,7 @@ data ParserError
 -- form is accepted.
 --
 -- You can run a parser using 'parseFlags' or 'parseSystemFlagsOrDie'.
-data FlagParser a
+data FlagsParser a
   = Actionable (Action a) (Map Name Flag) Usage
   | Invalid ParserError
   deriving Functor
@@ -172,7 +174,7 @@ mergeFlags flags1 flags2 = case Map.minViewWithKey $ flags1 `Map.intersection` f
   Just ((name, _), _) -> Left name
   Nothing -> Right $ flags1 `Map.union` flags2
 
-instance Applicative FlagParser where
+instance Applicative FlagsParser where
   pure res = Actionable (pure res) Map.empty emptyUsage
 
   Invalid err <*> _ = Invalid err
@@ -182,7 +184,7 @@ instance Applicative FlagParser where
       Left name -> Invalid $ Duplicate name
       Right flags -> Actionable (action1 <*> action2) flags (usage1 `andAlso` usage2)
 
-instance Alternative FlagParser where
+instance Alternative FlagsParser where
   empty = Invalid Empty
 
   Invalid Empty <|> parser = parser
@@ -265,7 +267,7 @@ useFlag name = modify (Set.insert name)
 -- | Returns a parser with the given name and description for a flag with no value, failing if the
 -- flag is not present. See also 'boolFlag' for a variant which doesn't fail when the flag is
 -- missing.
-switch :: Name -> Description -> FlagParser ()
+switch :: Name -> Description -> FlagsParser ()
 switch name desc = Actionable action flags usage where
   action = asks (Map.member name) >>= \case
     True -> useFlag name
@@ -275,12 +277,12 @@ switch name desc = Actionable action flags usage where
 
 -- | Returns a parser with the given name and description for a flag with no value, returning
 -- whether the flag was present.
-boolFlag :: Name -> Description -> FlagParser Bool
+boolFlag :: Name -> Description -> FlagsParser Bool
 boolFlag name desc = (True <$ switch name desc) <|> pure False
 
 -- | Returns a parser using the given parsing function, name, and description for a flag with an
 -- associated value.
-flag :: (Text -> Either String a) -> Name -> Description -> FlagParser a
+flag :: (Text -> Either String a) -> Name -> Description -> FlagsParser a
 flag convert name desc = Actionable action flags usage where
   action = do
     useFlag name
@@ -293,10 +295,11 @@ flag convert name desc = Actionable action flags usage where
   usage = Exactly name
 
 -- | Returns a parser for a single text value.
-textFlag :: Name -> Description -> FlagParser Text
+textFlag :: Name -> Description -> FlagsParser Text
 textFlag = flag Right
 
-hostFlag :: Name -> Description -> FlagParser (HostName, Maybe PortNumber)
+-- | Returns a parser for network hosts of the form @hostname:port@. The port part is optional.
+hostFlag :: Name -> Description -> FlagsParser (HostName, Maybe PortNumber)
 hostFlag = flag $ \txt -> do
   let (hostname, suffix) = T.breakOn ":" txt
   mbPort <- case T.stripPrefix ":" suffix of
@@ -306,17 +309,17 @@ hostFlag = flag $ \txt -> do
 
 -- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
 -- since 'flag'  will expect its values to be double-quoted and might not work as expected.
-autoFlag :: Read a => Name -> Description -> FlagParser a
+autoFlag :: Read a => Name -> Description -> FlagsParser a
 autoFlag = flag (readEither . T.unpack)
 
 -- | Returns a parser for a single flag with multiple text values.
-textListFlag :: Text -> Name -> Description -> FlagParser [Text]
+textListFlag :: Text -> Name -> Description -> FlagsParser [Text]
 textListFlag sep =  flag $ Right . T.splitOn sep
 
 -- | Returns a parser for a single flag with multiple values having a 'Read' instance, with a
 -- configurable separator. Empty values are always ignored, so it's possible to declare an empty
 -- list as @--list=@ and trailing commas are supported.
-autoListFlag :: Read a => Text -> Name -> Description -> FlagParser [a]
+autoListFlag :: Read a => Text -> Name -> Description -> FlagsParser [a]
 autoListFlag sep =
   flag $ sequenceA . fmap (readEither . T.unpack) . filter (not . T.null) . T.splitOn sep
 
@@ -370,7 +373,7 @@ runAction ignoreUnknown action flags tokens = case gatherValues ignoreUnknown fl
     Left (InvalidValue name val msg) -> Left $ InvalidFlagValue name val msg
 
 -- Preprocessing parser.
-reservedParser :: FlagParser (Bool, Set Name, Set Name)
+reservedParser :: FlagsParser (Bool, Set Name, Set Name)
 reservedParser =
   let textSetFlag name = Set.fromList <$> (flag (Right . T.splitOn ",") name "" <|> pure [])
   in (,,)
@@ -381,7 +384,7 @@ reservedParser =
 -- | Runs a parser on a list of tokens, returning the parsed flags alongside other non-flag
 -- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
 -- tokens will be considered arguments even if they look like flags.
-parseFlags :: FlagParser a -> [String] -> Either FlagError (a, [String])
+parseFlags :: FlagsParser a -> [String] -> Either FlagError (a, [String])
 parseFlags parser tokens = case reservedParser of
   Invalid _ -> error "unreachable"
   Actionable action0 flags0 _ -> do
@@ -405,7 +408,7 @@ parseFlags parser tokens = case reservedParser of
 
 -- | Runs a parser on the system's arguments, or exits with code 1 and prints the relevant error
 -- message in case of failure.
-parseSystemFlagsOrDie :: FlagParser a -> IO (a, [String])
+parseSystemFlagsOrDie :: FlagsParser a -> IO (a, [String])
 parseSystemFlagsOrDie parser = parseFlags parser <$> getArgs >>= \case
   Left err -> die $ T.unpack $ displayFlagError err
   Right res -> pure res
