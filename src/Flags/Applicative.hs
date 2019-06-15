@@ -308,7 +308,7 @@ hostFlag = flag $ \txt -> do
   pure (T.unpack hostname, mbPort)
 
 -- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
--- since 'flag'  will expect its values to be double-quoted and might not work as expected.
+-- since 'autoFlag'  will expect its values to be double-quoted and might not work as expected.
 autoFlag :: Read a => Name -> Description -> FlagsParser a
 autoFlag = flag (readEither . T.unpack)
 
