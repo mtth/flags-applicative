@@ -4,6 +4,7 @@ ghc:
 jobs:
   include:
     - stage: deploy
+      if: tag =~ ^v[\d\.]+$
       script: skip
       deploy:
         provider: hackage
