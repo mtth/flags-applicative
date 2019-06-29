@@ -2,5 +2,6 @@
 
 Simple flags parsing, inspired by
 [`optparse-applicative`](http://hackage.haskell.org/package/optparse-applicative).
-See the [documentation](http://hackage.haskell.org/package/flags-applicative)
+See the
+[documentation](http://hackage.haskell.org/package/flags-applicative/docs/Flags-Applicative.html)
 on Hackage for more information.

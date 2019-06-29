@@ -3,7 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Simple flags parsing module, inspired by @optparse-applicative@.
+-- | This module implements a lightweight flags parser, inspired by @optparse-applicative@.
 --
 -- Sample usage (note the default log level and optional context):
 --
@@ -30,7 +30,6 @@
 --   (opts, args) <- parseSystemFlagsOrDie optionsParser
 --   print opts
 -- @
-
 module Flags.Applicative (
   -- * Types
   Name, Description, FlagsParser, FlagError(..),
@@ -54,15 +53,15 @@ import Data.Foldable (foldl', toList)
 import Data.List (isPrefixOf)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Semigroup ((<>))
 import Data.Text (Text)
+import qualified Data.Text as T
 import Network.Socket (HostName, PortNumber)
 import System.Exit (die)
 import System.Environment (getArgs)
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
-import qualified Data.Text as T
 import Text.Read (readEither)
 
 -- The prefix used to identify all flags.
@@ -214,31 +213,31 @@ instance Alternative FlagsParser where
 
 -- | The possible parsing errors.
 data FlagError
-  -- | A flag was declared multiple times.
   = DuplicateFlag Name
-  -- | The parser was empty.
+  -- ^ A flag was declared multiple times.
   | EmptyParser
-  -- | The input included the @--help@ flag.
+  -- ^ The parser was empty.
   | Help Text
-  -- | At least one unary flag was specified multiple times with different values.
+  -- ^ The input included the @--help@ flag.
   | InconsistentFlagValues Name
-  -- | A unary flag's value failed to parse.
+  -- ^ At least one unary flag was specified multiple times with different values.
   | InvalidFlagValue Name Text String
-  -- | A required flag was missing; at least one of the returned flags should be set.
+  -- ^ A unary flag's value failed to parse.
   | MissingFlags (NonEmpty Name)
-  -- | A unary flag was missing a value. This can happen either if a value-less unary flag was the
+  -- ^ A required flag was missing; at least one of the returned flags should be set.
+  | MissingFlagValue Name
+  -- ^ A unary flag was missing a value. This can happen either if a value-less unary flag was the
   -- last token or was followed by a value which is also a flag name (in which case you should use
   -- the single-token form: @--flag=--value@).
-  | MissingFlagValue Name
-  -- | A flag with a reserved name was declared.
   | ReservedFlag Name
-  -- | A nullary flag was given a value.
+  -- ^ A flag with a reserved name was declared.
   | UnexpectedFlagValue Name
-  -- | At least one flag was set but unused. This can happen when optional flags are set but their
-  -- branch is not selected.
+  -- ^ A nullary flag was given a value.
   | UnexpectedFlags (NonEmpty Name)
-  -- | An unknown flag was set.
+  -- ^ At least one flag was set but unused. This can happen when optional flags are set but their
+  -- branch is not selected.
   | UnknownFlag Name
+  -- ^ An unknown flag was set.
   deriving (Eq, Show)
 
 displayFlags :: Foldable f => f Name -> Text
@@ -260,7 +259,7 @@ displayFlagError (UnexpectedFlagValue name) = "unexpected value for " <> qualify
 displayFlagError (UnexpectedFlags names) = "unexpected " <> displayFlags names
 displayFlagError (UnknownFlag name) = "undeclared " <> qualify name
 
--- Mark a flag as used. This is useful to check for unexpected flags after parsing is complete.
+-- Marks a flag as used. This is useful to check for unexpected flags after parsing is complete.
 useFlag :: Name -> Action ()
 useFlag name = modify (Set.insert name)
 
@@ -324,8 +323,8 @@ autoListFlag sep =
   flag $ sequenceA . fmap (readEither . T.unpack) . filter (not . T.null) . T.splitOn sep
 
 -- Tries to gather all raw flag values into a map. When @ignoreUnknown@ is true, this function will
--- pass through any unknown flags into the returned argument list, otherwise it will throw a
--- 'FlagError'.
+-- pass through any unknown flags into the returned argument list( and pass through any @--@ value),
+-- otherwise it will throw a 'FlagError'.
 gatherValues :: Bool -> Map Name Flag -> [String] -> Either FlagError ((Map Name Text), [String])
 gatherValues ignoreUnknown flags = go where
   go [] = Right (Map.empty, [])
@@ -333,8 +332,8 @@ gatherValues ignoreUnknown flags = go where
     then second (token:) <$> go tokens
     else
       let entry = drop 2 token :: String
-      in if entry == ""
-        then Right (Map.empty, tokens)
+      in if null entry
+        then Right (Map.empty, if ignoreUnknown then "--":tokens else tokens)
         else
           let
             (name, pval) = T.breakOn "=" (T.pack entry)

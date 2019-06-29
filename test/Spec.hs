@@ -1,12 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-import Control.Applicative ((<|>))
+import Control.Applicative ((<|>), optional)
 import Data.Either (isLeft)
 import Data.List.NonEmpty (NonEmpty(..))
+import Test.Hspec (describe, expectationFailure, hspec, it, shouldBe)
+
 import Flags.Applicative
-import Test.Hspec
-import Test.Hspec.QuickCheck
 
 main :: IO ()
 main = hspec $ do
@@ -105,3 +105,13 @@ main = hspec $ do
       case res of
         Left (MissingFlags ("foo" :| ["bar"])) -> pure ()
         _ -> expectationFailure $ show res
+    it "should ignore conflicting flags after --" $ do
+      let
+        parser = switch "foo" "" <|> switch "bar" ""
+        res = parseFlags parser ["--foo", "--", "--bar"]
+      res `shouldBe` Right ((), ["--bar"])
+    it "should ignore undeclared flags after --" $ do
+      let
+        parser = optional $ textFlag "foo" ""
+        res = parseFlags parser ["--", "--bar=2"]
+      res `shouldBe` Right (Nothing, ["--bar=2"])
