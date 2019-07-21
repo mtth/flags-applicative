@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
 
 -- | This module implements a lightweight flags parser, inspired by @optparse-applicative@.
 --
@@ -15,12 +14,14 @@
 -- import Data.Text (Text)
 -- import Flags.Applicative
 --
+-- -- Custom flags for our example.
 -- data Flags = Flags
 --   { rootPath :: Text
 --   , logLevel :: Int
 --   , context :: Maybe Text
 --   } deriving Show
 --
+-- -- Returns a parser from CLI arguments to our custom flags.
 -- flagsParser :: FlagsParser Flags
 -- flagsParser = Flags
 --   \<$\> flag textVal "root" "path to the root"
@@ -29,7 +30,7 @@
 --
 -- main :: IO ()
 -- main = do
---   (flags, args) <- parseSystemFlagsOrDie optionsParser
+--   (flags, args) <- parseSystemFlagsOrDie flagsParser
 --   print flags
 -- @
 module Flags.Applicative (
