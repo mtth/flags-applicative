@@ -8,23 +8,24 @@ module Main where
 import Control.Applicative ((<|>), optional)
 import Data.Text (Text, pack)
 import Flags.Applicative
-import System.Environment (getArgs)
 
-data Mode = Lenient | Strict deriving (Read, Show)
+data Mode = Lenient | Strict deriving (Bounded, Enum, Read, Show)
 
-data Options = Options
+data Flags = Flags
   { rootPath :: Text
   , logLevel :: Int
   , mode :: Mode
   , context :: Maybe (Text, [Double])
   } deriving Show
 
-optionsParser :: FlagsParser Options
-optionsParser = Options
-  <$> (textFlag "root" "path to the root" <|> ("HERE" <$ switch "default_root" ""))
-  <*> autoFlag "log_level" "log verbosity"
-  <*> (autoFlag "mode" "mode [Lenient|Strict]" <|> pure Strict)
-  <*> (optional $ (,) <$> textFlag "context" "" <*> (autoListFlag "," "values" "" <|> pure []))
+flagsParser :: FlagsParser Flags
+flagsParser = Flags
+  <$> (flag textVal "root" "path to the root" <|> ("HERE" <$ switch "default_root" ""))
+  <*> flag intVal "log_level" "log verbosity"
+  <*> (flag enumVal "mode" "mode [Lenient|Strict]" <|> pure Strict)
+  <*> (optional $ (,)
+    <$> flag textVal "context" ""
+    <*> (flag (listOf fracVal) "values" "" <|> pure []))
 
 main :: IO ()
-main = parseSystemFlagsOrDie optionsParser >>= print
+main = parseSystemFlagsOrDie flagsParser >>= print

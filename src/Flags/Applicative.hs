@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 
 -- | This module implements a lightweight flags parser, inspired by @optparse-applicative@.
 --
@@ -14,32 +15,37 @@
 -- import Data.Text (Text)
 -- import Flags.Applicative
 --
--- data Options = Options
+-- data Flags = Flags
 --   { rootPath :: Text
 --   , logLevel :: Int
 --   , context :: Maybe Text
 --   } deriving Show
 --
--- optionsParser :: FlagsParser Options
--- optionsParser = Options \<$\> textFlag "root" "path to the root"
---                         \<*\> (autoFlag "log_level" "" \<|\> pure 0)
---                         \<*\> (optional $ textFlag "context" "")
+-- flagsParser :: FlagsParser Flags
+-- flagsParser = Flags
+--   \<$\> flag textVal "root" "path to the root"
+--   \<*\> (flag autoVal "log_level" "" \<|\> pure 0)
+--   \<*\> (optional $ flag textVal "context" "")
 --
 -- main :: IO ()
 -- main = do
---   (opts, args) <- parseSystemFlagsOrDie optionsParser
---   print opts
+--   (flags, args) <- parseSystemFlagsOrDie optionsParser
+--   print flags
 -- @
 module Flags.Applicative (
-  -- * Types
-  Name, Description, FlagsParser, FlagError(..),
-  -- * Running parsers
-  parseFlags, parseSystemFlagsOrDie,
   -- * Declaring flags
+  Name, Description,
   -- ** Nullary flags
   switch, boolFlag,
   -- ** Unary flags
-  flag, textFlag, hostFlag, autoFlag, textListFlag, autoListFlag
+  flag, Reader,
+  -- *** Common readers
+  autoVal, textVal, fracVal, intVal, enumVal, hostVal,
+  -- *** Reader combinators
+  listOf, mapOf,
+  -- * Running parsers
+  FlagsParser, FlagsError(..),
+  parseFlags, parseSystemFlagsOrDie
 ) where
 
 import Control.Applicative ((<|>), Alternative, empty)
@@ -59,9 +65,11 @@ import qualified Data.Set as Set
 import Data.Semigroup ((<>))
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Read as T
 import Network.Socket (HostName, PortNumber)
 import System.Exit (die)
 import System.Environment (getArgs)
+import Text.Casing (fromHumps, toScreamingSnake)
 import Text.Read (readEither)
 
 -- The prefix used to identify all flags.
@@ -155,10 +163,9 @@ data ParserError
 -- There are two types of flags:
 --
 -- * Nullary flags created with 'switch' and 'boolFlag', which do not accept a value.
--- * Unary flags created with 'flag' and its convenience variants (e.g. 'textFlag', 'autoFlag',
--- 'autoListFlag'). These expect a value to be passed in either after an equal sign (@--foo=value@)
--- or as the following input value (@--foo value@). If the value starts with @--@, only the first
--- form is accepted.
+-- * Unary flags created with 'flag'. These expect a value to be passed in either after an equal
+-- sign (@--foo=value@) or as the following input value (@--foo value@). If the value starts with
+-- @--@, only the first form is accepted.
 --
 -- You can run a parser using 'parseFlags' or 'parseSystemFlagsOrDie'.
 data FlagsParser a
@@ -212,7 +219,7 @@ instance Alternative FlagsParser where
               pure res
 
 -- | The possible parsing errors.
-data FlagError
+data FlagsError
   = DuplicateFlag Name
   -- ^ A flag was declared multiple times.
   | EmptyParser
@@ -244,7 +251,7 @@ displayFlags :: Foldable f => f Name -> Text
 displayFlags = T.intercalate " " . fmap qualify . toList
 
 -- Pretty-print a 'FlagError'.
-displayFlagError :: FlagError -> Text
+displayFlagError :: FlagsError -> Text
 displayFlagError (DuplicateFlag name) = qualify name <> " was declared multiple times"
 displayFlagError EmptyParser = "empty parser"
 displayFlagError (Help usage) = usage
@@ -279,9 +286,12 @@ switch name desc = Actionable action flags usage where
 boolFlag :: Name -> Description -> FlagsParser Bool
 boolFlag name desc = (True <$ switch name desc) <|> pure False
 
--- | Returns a parser using the given parsing function, name, and description for a flag with an
+-- | The type used to read flag values.
+type Reader a = Text -> Either String a
+
+-- | Returns a parser using the given value reader, name, and description for a flag with an
 -- associated value.
-flag :: (Text -> Either String a) -> Name -> Description -> FlagsParser a
+flag :: Reader a -> Name -> Description -> FlagsParser a
 flag convert name desc = Actionable action flags usage where
   action = do
     useFlag name
@@ -293,39 +303,79 @@ flag convert name desc = Actionable action flags usage where
   flags = Map.singleton name (Flag Unary desc)
   usage = Exactly name
 
--- | Returns a parser for a single text value.
-textFlag :: Name -> Description -> FlagsParser Text
-textFlag = flag Right
+-- | Returns a reader for any value with a 'Read' instance. Prefer 'textVal' for textual values
+-- since 'autoVal'  will expect its values to be double-quoted and might not work as expected.
+autoVal :: Read a => Reader a
+autoVal = readEither . T.unpack
 
--- | Returns a parser for network hosts of the form @hostname:port@. The port part is optional.
-hostFlag :: Name -> Description -> FlagsParser (HostName, Maybe PortNumber)
-hostFlag = flag $ \txt -> do
+-- | Returns a reader for a single text value.
+textVal :: Reader Text
+textVal = Right
+
+-- Fully executes a reader. This function is useful for interacting with "Data.Text.Read".
+readingFully :: (Text -> Either String (a, Text)) -> Reader a
+readingFully f t = case f t of
+  Left e -> Left e
+  Right (v, t') -> if T.null t' then Right v else Left $ T.unpack $ "trailing chars: " <> t'
+
+-- | Returns a reader for any number with a 'Fractional' instance (e.g. 'Double', 'Float').
+fracVal :: Fractional a => Reader a
+fracVal = readingFully T.rational
+
+-- | Returns a reader for any number with an 'Integral instance (e.g. 'Int', 'Integer').
+intVal :: Integral a => Reader a
+intVal = readingFully $ T.signed T.decimal
+
+-- | Returns a reader for 'Enum' instances. This reader assumes that enum (Haskell) constructors are
+-- written in PascalCase and expects UPPER_SNAKE_CASE as command-line flag values. For example:
+--
+-- > data Mode = Flexible | Strict deriving (Bounded, Enum, Show)
+-- > modeFlag = flag enumVal "mode" "the mode" :: FlagsParser Mode
+--
+-- The above flag will accept values @--mode=FLEXIBLE@ and @--mode=STRICT@.
+enumVal :: (Bounded a, Enum a, Show a) => Reader a
+enumVal = parse where
+  write = T.pack . toScreamingSnake . fromHumps . show -- Serializes an enum value.
+  m = Map.fromList $ fmap (\v -> (write v, v)) [minBound .. maxBound]
+  parse t = case Map.lookup t m of
+    Nothing ->
+      let e = t <> " is not in " <> T.intercalate "," (Map.keys m)
+      in Left $ T.unpack e
+    Just v -> Right v
+
+-- | Returns a reader for network hosts of the form @hostname:port@. The port part is optional.
+hostVal :: Reader (HostName, Maybe PortNumber)
+hostVal txt = do
   let (hostname, suffix) = T.breakOn ":" txt
   mbPort <- case T.stripPrefix ":" suffix of
       Nothing -> Right Nothing
       Just portStr -> Just <$> readEither (T.unpack portStr)
   pure (T.unpack hostname, mbPort)
 
--- | Returns a parser for any value with a 'Read' instance. Prefer 'textFlag' for textual values
--- since 'autoFlag'  will expect its values to be double-quoted and might not work as expected.
-autoFlag :: Read a => Name -> Description -> FlagsParser a
-autoFlag = flag (readEither . T.unpack)
+-- | Transforms a single-valued unary flag into one which accepts multiple comma-separated values.
+-- For example, to parse a comma-separated list of integers:
+--
+-- > countsFlag = flag (listOf intVal) "counts" "the counts"
+--
+-- Empty text values are ignored, which means both that trailing commas are supported and that an
+-- empty list can be specified simply by specifying an empty value on the command line. Note that
+-- escapes are not supported, so values should not contain any commas.
+listOf :: Reader a -> Reader [a]
+listOf f = traverse f . filter (not . T.null) . T.splitOn ","
 
--- | Returns a parser for a single flag with multiple text values.
-textListFlag :: Text -> Name -> Description -> FlagsParser [Text]
-textListFlag sep =  flag $ Right . T.splitOn sep
-
--- | Returns a parser for a single flag with multiple values having a 'Read' instance, with a
--- configurable separator. Empty values are always ignored, so it's possible to declare an empty
--- list as @--list=@ and trailing commas are supported.
-autoListFlag :: Read a => Text -> Name -> Description -> FlagsParser [a]
-autoListFlag sep =
-  flag $ sequenceA . fmap (readEither . T.unpack) . filter (not . T.null) . T.splitOn sep
+-- | Transforms a single-valued unary flag into one which accepts a comma-separated list of
+-- colon-delimited key-value pairs. The syntax is @key:value[,key:value...]@. Note that escapes are
+-- not supported, so neither keys not values should contain colons or commas.
+mapOf :: Ord a => Reader a -> Reader b -> Reader (Map a b)
+mapOf f g = fmap Map.fromList <$> listOf (h . T.breakOn ":") where
+  h (k, v) = case T.uncons v of
+    Nothing -> Left $ T.unpack $ "empty value for key " <> k
+    Just (_, v') -> (,) <$> f k <*> g v'
 
 -- Tries to gather all raw flag values into a map. When @ignoreUnknown@ is true, this function will
 -- pass through any unknown flags into the returned argument list( and pass through any @--@ value),
 -- otherwise it will throw a 'FlagError'.
-gatherValues :: Bool -> Map Name Flag -> [String] -> Either FlagError ((Map Name Text), [String])
+gatherValues :: Bool -> Map Name Flag -> [String] -> Either FlagsError ((Map Name Text), [String])
 gatherValues ignoreUnknown flags = go where
   go [] = Right (Map.empty, [])
   go (token:tokens) = if not (prefix `isPrefixOf` token)
@@ -361,7 +411,7 @@ gatherValues ignoreUnknown flags = go where
               Just (_, val) -> insert val tokens
 
 -- Runs a single parsing pass.
-runAction :: Bool -> Action a -> Map Name Flag -> [String] -> Either FlagError (a, Set Name, [String])
+runAction :: Bool -> Action a -> Map Name Flag -> [String] -> Either FlagsError (a, Set Name, [String])
 runAction ignoreUnknown action flags tokens = case gatherValues ignoreUnknown flags tokens of
   Left err -> Left err
   Right (values, args) -> case runExcept $ runRWST action values Set.empty of
@@ -383,7 +433,7 @@ reservedParser =
 -- | Runs a parser on a list of tokens, returning the parsed flags alongside other non-flag
 -- arguments (i.e. which don't start with @--@). If the special @--@ token is found, all following
 -- tokens will be considered arguments even if they look like flags.
-parseFlags :: FlagsParser a -> [String] -> Either FlagError (a, [String])
+parseFlags :: FlagsParser a -> [String] -> Either FlagsError (a, [String])
 parseFlags parser tokens = case reservedParser of
   Invalid _ -> error "unreachable"
   Actionable action0 flags0 _ -> do
