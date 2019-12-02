@@ -41,7 +41,7 @@ module Flags.Applicative (
   -- ** Unary flags
   flag, Reader,
   -- *** Common readers
-  autoVal, textVal, fracVal, intVal, enumVal, hostVal,
+  autoVal, textVal, stringVal, fracVal, intVal, enumVal, hostVal,
   -- *** Reader combinators
   listOf, mapOf,
   -- * Running parsers
@@ -308,6 +308,11 @@ flag convert name desc = Actionable action flags usage where
 -- since 'autoVal'  will expect its values to be double-quoted and might not work as expected.
 autoVal :: Read a => Reader a
 autoVal = readEither . T.unpack
+
+-- | Returns a reader for a single string value. This can useful when interfacing with non-text APIs
+-- (e.g. 'FilePath') but in general prefer 'textVal'.
+stringVal :: Reader String
+stringVal = Right . T.unpack
 
 -- | Returns a reader for a single text value.
 textVal :: Reader Text

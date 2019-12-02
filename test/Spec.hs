@@ -73,6 +73,12 @@ main = hspec $ do
         res = parseFlags parser ["--foo=1", "--foo=1"]
       res `shouldBe` Right (1, [])
 
+    it "should support strings" $ do
+      let
+        parser = flag stringVal "bar" ""
+        res = parseFlags parser ["--bar", "abc0"]
+      res `shouldBe` Right ("abc0", [])
+
     it "should support text lists" $ do
       let
         parser = flag (listOf textVal) "bar" ""
