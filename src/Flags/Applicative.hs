@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
@@ -63,7 +64,9 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+#if !MIN_VERSION_base(4, 11, 0)
 import Data.Semigroup ((<>))
+#endif
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Read as T
